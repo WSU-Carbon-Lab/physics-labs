@@ -20,6 +20,15 @@ from inst_ctrl.fluke import (
     TriggerMode,
 )
 
+from inst_ctrl.rigol import (
+    RigolDP800,
+    RigolError,
+    RigolConnectionError,
+    RigolValidationError,
+    RigolCommandError,
+    Channel,
+)
+
 __all__ = [
     'SiglentSDG2042X',
     'SiglentError',
@@ -37,4 +46,10 @@ __all__ = [
     'Func2',
     'Rate',
     'TriggerMode',
+    'RigolDP800',
+    'RigolError',
+    'RigolConnectionError',
+    'RigolValidationError',
+    'RigolCommandError',
+    'Channel',
 ]

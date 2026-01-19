@@ -1,6 +1,6 @@
 # inst-ctrl
 
-Python interfaces for controlling Fluke digital multimeters and Siglent arbitrary waveform generators via PyVISA.
+Python interfaces for controlling Fluke digital multimeters, Siglent arbitrary waveform generators, and Rigol power supplies via PyVISA.
 
 ## Overview
 
@@ -8,6 +8,7 @@ This package provides high-level Python interfaces for instrument control:
 
 - **Fluke 45** and **Fluke 8845A/8846A** digital multimeters
 - **Siglent SDG2042X** arbitrary waveform generator
+- **Rigol DP800** series programmable power supplies
 
 All instruments support multiple connection methods (GPIB, USB, Ethernet, RS-232) and provide type-safe, well-documented APIs with comprehensive error handling.
 
@@ -80,6 +81,19 @@ with SiglentSDG2042X() as sig_gen:
     sig_gen.output_state = True
 ```
 
+### Rigol DP800 Power Supply
+
+```python
+from inst_ctrl import RigolDP800, Channel
+
+# Connect via Ethernet
+with RigolDP800(ip_address='192.168.1.100') as psu:
+    psu.channel = Channel.CH1
+    psu.voltage = 5.0
+    psu.current = 1.0
+    psu.output = True
+```
+
 ## Connection Methods
 
 ### Fluke Instruments
@@ -132,6 +146,39 @@ sig_gen.connect()
 ```python
 sig_gen = SiglentSDG2042X(resource_name='USB0::0x0483::0x7540::SDG2042X12345678::INSTR')
 sig_gen.connect()
+```
+
+### Rigol Instruments
+
+**Ethernet Connection:**
+```python
+psu = RigolDP800(ip_address='192.168.1.100')
+psu.connect()
+```
+
+**USB Connection:**
+```python
+psu = RigolDP800(usb_serial='DP8C12345678')
+psu.connect()
+```
+
+**GPIB Connection:**
+```python
+psu = RigolDP800(gpib_address=5)
+psu.connect()
+```
+
+**Direct Resource Name:**
+```python
+psu = RigolDP800(resource_name='TCPIP0::192.168.1.100::INSTR')
+psu.connect()
+```
+
+**Auto-Discovery:**
+```python
+# Automatically finds first Rigol DP800 instrument
+psu = RigolDP800()
+psu.connect()
 ```
 
 ## Fluke 45 Examples
@@ -338,6 +385,80 @@ with SiglentSDG2042X() as sig_gen:
     sig_gen.select_arbitrary_waveform(index=1)
 ```
 
+## Rigol DP800 Examples
+
+### Basic Power Supply Control
+
+```python
+from inst_ctrl import RigolDP800, Channel
+
+with RigolDP800(ip_address='192.168.1.100') as psu:
+    psu.channel = Channel.CH1
+    psu.voltage = 5.0
+    psu.current = 1.0
+    psu.output = True
+```
+
+### Set Voltage and Current Together
+
+```python
+with RigolDP800() as psu:
+    psu.apply(voltage=12.0, current=2.0, channel=Channel.CH1)
+    psu.output_on(Channel.CH1)
+```
+
+### Measure Output Parameters
+
+```python
+with RigolDP800() as psu:
+    psu.channel = Channel.CH1
+    voltage = psu.measured_voltage
+    current = psu.measured_current
+    power = psu.measured_power
+    print(f"V: {voltage}V, I: {current}A, P: {power}W")
+```
+
+### Measure All Parameters at Once
+
+```python
+with RigolDP800() as psu:
+    voltage, current, power = psu.measure_all(Channel.CH1)
+    print(f"V: {voltage}V, I: {current}A, P: {power}W")
+```
+
+### Multi-Channel Control
+
+```python
+with RigolDP800() as psu:
+    # Configure and enable CH1
+    psu.apply(voltage=5.0, current=1.0, channel=Channel.CH1)
+    psu.output_on(Channel.CH1)
+
+    # Configure and enable CH2
+    psu.apply(voltage=12.0, current=2.0, channel=Channel.CH2)
+    psu.output_on(Channel.CH2)
+```
+
+### Over-Voltage and Over-Current Protection
+
+```python
+with RigolDP800() as psu:
+    psu.channel = Channel.CH1
+    psu.set_ovp(15.0)  # Set OVP to 15V
+    psu.enable_ovp(True)  # Enable OVP
+
+    psu.set_ocp(2.5)  # Set OCP to 2.5A
+    psu.enable_ocp(True)  # Enable OCP
+```
+
+### Query Settings
+
+```python
+with RigolDP800() as psu:
+    voltage, current = psu.get_settings(Channel.CH1)
+    print(f"CH1 settings: {voltage}V, {current}A")
+```
+
 ## API Reference
 
 ### Fluke 45
@@ -447,6 +568,53 @@ Fluke88 inherits from Fluke45 and provides the same interface. Key differences:
   - `limits.phase_min`, `limits.phase_max`
   - `limits.reset_to_defaults()`
 
+### Rigol DP800
+
+#### Connection
+
+- `RigolDP800(resource_name=None, ip_address=None, usb_serial=None, gpib_address=None, timeout=5000)`
+- `connect()` - Establish connection
+- `disconnect()` - Close connection
+- `check_connection()` - Verify communication
+
+#### Channel Control
+
+- `channel` - Set/get active channel (Channel enum, string, or int)
+
+#### Voltage and Current Control
+
+- `voltage` - Set/get voltage setting for active channel (volts)
+- `current` - Set/get current limit for active channel (amperes)
+- `apply(voltage, current, channel=None)` - Set both voltage and current for specified channel
+- `get_settings(channel=None)` - Query voltage and current settings (returns tuple)
+
+#### Measurement
+
+- `measured_voltage` - Measure actual output voltage for active channel
+- `measured_current` - Measure actual output voltage
+- `measured_power` - Measure actual output power (watts)
+- `power` - Convenience alias for measured_power
+- `measure_all(channel=None)` - Measure voltage, current, and power (returns tuple)
+
+#### Output Control
+
+- `output` - Set/get output state (True/False or 'ON'/'OFF')
+- `output_on(channel=None)` - Enable output for specified channel
+- `output_off(channel=None)` - Disable output for specified channel
+
+#### Protection
+
+- `set_ovp(value, channel=None)` - Set over-voltage protection level
+- `set_ocp(value, channel=None)` - Set over-current protection level
+- `enable_ovp(state=True, channel=None)` - Enable/disable over-voltage protection
+- `enable_ocp(state=True, channel=None)` - Enable/disable over-current protection
+
+#### System Commands
+
+- `reset()` - Reset instrument to factory defaults
+- `clear_status()` - Clear status registers
+- `self_test()` - Execute self-test (returns True if passed)
+
 ## Enums and Constants
 
 ### Fluke Enums
@@ -459,6 +627,10 @@ Fluke88 inherits from Fluke45 and provides the same interface. Key differences:
 ### Siglent Waveform Types
 
 - 'SINE', 'SQUARE', 'RAMP', 'PULSE', 'NOISE', 'ARB', 'DC', 'PRBS', 'IQ'
+
+### Rigol Enums
+
+- `Channel` - Power supply channels: CH1, CH2, CH3
 
 ## Error Handling
 
@@ -477,6 +649,13 @@ All instruments raise specific exception types:
 - `SiglentConnectionError` - Connection failures
 - `SiglentValidationError` - Invalid parameter values
 - `SiglentCommandError` - Command execution failures
+
+### Rigol Exceptions
+
+- `RigolError` - Base exception
+- `RigolConnectionError` - Connection failures
+- `RigolValidationError` - Invalid parameter values
+- `RigolCommandError` - Command execution failures
 
 ### Example Error Handling
 
@@ -507,6 +686,10 @@ with Fluke45(gpib_address=3) as dmm:
 with SiglentSDG2042X() as sig_gen:
     sig_gen.frequency = 1000
     sig_gen.output_state = True
+
+with RigolDP800(ip_address='192.168.1.100') as psu:
+    psu.voltage = 5.0
+    psu.output = True
 ```
 
 ## Type Safety
@@ -534,7 +717,8 @@ inst_ctrl/
 │   └── inst_ctrl/
 │       ├── __init__.py
 │       ├── fluke.py      # Fluke 45 and 8845A/8846A interfaces
-│       └── siglent.py    # Siglent SDG2042X interface
+│       ├── siglent.py    # Siglent SDG2042X interface
+│       └── rigol.py      # Rigol DP800 series power supply interface
 ├── pyproject.toml
 └── README.md
 ```
