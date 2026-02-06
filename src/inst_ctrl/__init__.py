@@ -69,8 +69,9 @@ Rigol Measure Output:
     ...     print(f"V: {voltage}V, I: {current}A, P: {power}W")
 """
 
-from inst_ctrl.siglent import (
+from inst_ctrl.sig_gen import (
     SiglentSDG2042X,
+    PhilipsPM5139,
     SiglentError,
     SiglentConnectionError,
     SiglentValidationError,
@@ -78,7 +79,7 @@ from inst_ctrl.siglent import (
     ParameterLimits,
 )
 
-from inst_ctrl.fluke import (
+from inst_ctrl.dmm import (
     Fluke45,
     Fluke88,
     FlukeError,
@@ -91,7 +92,7 @@ from inst_ctrl.fluke import (
     TriggerMode,
 )
 
-from inst_ctrl.rigol import (
+from inst_ctrl.psu import (
     RigolDP800,
     RigolError,
     RigolConnectionError,
@@ -102,6 +103,7 @@ from inst_ctrl.rigol import (
 
 __all__ = [
     'SiglentSDG2042X',
+    'PhilipsPM5139',
     'SiglentError',
     'SiglentConnectionError',
     'SiglentValidationError',

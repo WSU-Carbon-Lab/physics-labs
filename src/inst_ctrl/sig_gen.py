@@ -1,8 +1,9 @@
 """
-Instrument control for the Siglent SDG2042X arbitrary waveform generator.
+Instrument control for the Signal Generator - Siglent SDG2042X and Philips PM5139.
 
 This module provides Python interfaces for controlling Siglent SDG2042X arbitrary
-waveform generators via USB, Ethernet, or GPIB connections using PyVISA.
+waveform generators and Philips PM5139 signal generators via USB, Ethernet, or
+GPIB connections using PyVISA.
 
 Examples
 --------
@@ -26,11 +27,22 @@ Use pint units (requires pint package):
     >>> sig_gen.connect()
     ...     freq = sig_gen.frequency
     ...     print(f"Frequency: {freq}")
+
+Philips PM5139 (same API, drop-in replacement):
+    >>> from inst_ctrl import PhilipsPM5139
+    >>> with PhilipsPM5139() as sig_gen:
+    ...     sig_gen.channel = 1
+    ...     sig_gen.waveform_type = 'SINE'
+    ...     sig_gen.frequency = 1000
+    ...     sig_gen.amplitude = 1.0
+    ...     sig_gen.output_state = True
 """
 
 from __future__ import annotations
 
+import re
 import pyvisa
+from pyvisa import constants as pyvisa_constants
 from pyvisa.resources import MessageBasedResource
 from typing import Optional, Union, List, Dict, Any, Tuple, cast
 try:
@@ -1972,5 +1984,589 @@ class SiglentSDG2042X:
         except pyvisa.Error as e:
             raise SiglentCommandError(
                 f"Failed to query all parameters on channel {self._active_channel}",
+                pyvisa_error=e
+            )
+
+
+class PhilipsPM5139:
+    """
+    Interface for Philips/Fluke PM5139 signal generator.
+
+    Provides the same public API as SiglentSDG2042X for drop-in replacement.
+    Controls frequency, amplitude, offset, waveform type, and output via GPIB or RS-232.
+    Supports unit_mode 'tuple' or 'pint'. Single-channel; phase and pulse/rise/fall
+    are no-op or raise where unsupported.
+
+    Parameters
+    ----------
+    resource_name : str, optional
+        VISA resource (e.g. 'GPIB0::20::INSTR' or 'ASRL1::INSTR').
+    timeout : int, optional
+        Communication timeout in milliseconds. Default is 5000.
+    unit_mode : str, optional
+        Unit return mode: 'tuple' or 'pint'. Default is 'tuple'.
+
+    Attributes
+    ----------
+    VALID_WAVEFORMS : list[str]
+        Valid waveform types: 'SINE', 'SQUARE', 'RAMP', 'PULSE', 'ARB', 'DC'.
+    limits : ParameterLimits
+        Parameter validation limits (PM5139 ranges).
+
+    Examples
+    --------
+    >>> from inst_ctrl import PhilipsPM5139
+    >>> with PhilipsPM5139() as sig_gen:
+    ...     sig_gen.channel = 1
+    ...     sig_gen.waveform_type = 'SINE'
+    ...     sig_gen.frequency = 1000
+    ...     sig_gen.amplitude = 1.0
+    ...     sig_gen.output_state = True
+    """
+
+    VALID_WAVEFORMS = ['SINE', 'SQUARE', 'RAMP', 'PULSE', 'ARB', 'DC']
+
+    _WAVEFORM_TO_PM5139: Dict[str, str] = {
+        'SINE': 'SINE',
+        'SQUARE': 'SQUARE',
+        'RAMP': 'TRNGLE',
+        'PULSE': 'POSPULSE',
+        'ARB': 'ARB',
+        'DC': 'DC',
+    }
+
+    _PM5139_TO_WAVEFORM: Dict[str, str] = {
+        'SINE': 'SINE',
+        'SQR': 'SQUARE',
+        'SQUARE': 'SQUARE',
+        'TRNGLE': 'RAMP',
+        'POSSAWTOOTH': 'RAMP',
+        'SAWTOOTH': 'RAMP',
+        'NEGSAWTOOTH': 'RAMP',
+        'POSPULSE': 'PULSE',
+        'NEGPULSE': 'PULSE',
+        'HAVERSINE': 'SINE',
+        'ARB': 'ARB',
+        'DC': 'DC',
+    }
+
+    def __init__(
+        self,
+        resource_name: Optional[str] = None,
+        timeout: int = 5000,
+        unit_mode: str = 'tuple'
+    ) -> None:
+        self.rm = pyvisa.ResourceManager()
+        self.instrument: Optional[MessageBasedResource] = None
+        self.resource_name = resource_name
+        self.timeout = timeout
+        self.limits = ParameterLimits()
+        self.limits.freq_min = 1e-4
+        self.limits.freq_max = 20e6
+        self.limits.amp_min = 0.0
+        self.limits.amp_max = 20.0
+        self.limits.offset_min = -10.0
+        self.limits.offset_max = 10.0
+        self._unit_mode: Optional[str] = None
+        self.unit_mode = unit_mode
+
+    def __enter__(self) -> PhilipsPM5139:
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[object]) -> None:
+        self.disconnect()
+
+    @property
+    def unit_mode(self) -> Optional[str]:
+        return self._unit_mode
+
+    @unit_mode.setter
+    def unit_mode(self, value: str) -> None:
+        if value not in ['pint', 'tuple']:
+            raise SiglentValidationError(
+                f"Unit mode must be 'pint' or 'tuple', got '{value}'"
+            )
+        self._unit_mode = value
+
+    def _ensure_connected(self) -> None:
+        if not self.instrument:
+            raise SiglentConnectionError(
+                "Not connected to instrument. Use 'with PhilipsPM5139() as sig_gen:' "
+                "or call sig_gen.connect() before using properties."
+            )
+
+    def _get_instrument(self) -> MessageBasedResource:
+        self._ensure_connected()
+        return cast(MessageBasedResource, self.instrument)
+
+    def _extract_value_and_unit(self, value_string: str) -> Tuple[float, str]:
+        match = re.match(r'([+-]?[\d.]+(?:[eE][+-]?\d+)?)(.+)?', value_string.strip())
+        if match:
+            value = float(match.group(1))
+            unit = match.group(2).strip() if match.group(2) else ''
+            return value, unit
+        raise ValueError(f"Could not extract value and unit from: {value_string}")
+
+    def _format_quantity(self, value: float, unit_str: str, pint_unit: str) -> Union[Any, Tuple[float, str]]:
+        if self._unit_mode == 'pint' and ureg is not None:
+            return ureg.Quantity(value, pint_unit)
+        return (value, unit_str)
+
+    def _configure_serial(self, resource: str) -> None:
+        if not resource.upper().startswith('ASRL'):
+            return
+        instr = self.instrument
+        if instr is None:
+            return
+        try:
+            ser = cast(Any, instr)
+            if hasattr(ser, 'baud_rate'):
+                ser.baud_rate = 9600
+            if hasattr(ser, 'data_bits'):
+                ser.data_bits = 8
+            if hasattr(ser, 'parity'):
+                ser.parity = pyvisa_constants.Parity.none
+            if hasattr(ser, 'write_termination'):
+                ser.write_termination = '\n'
+            if hasattr(ser, 'read_termination'):
+                ser.read_termination = '\n'
+            instr.write('\x1B2')
+        except (pyvisa.Error, AttributeError):
+            pass
+
+    def connect(self) -> None:
+        if self.resource_name:
+            try:
+                self.instrument = cast(MessageBasedResource, self.rm.open_resource(self.resource_name))
+                self.instrument.timeout = self.timeout
+                self._configure_serial(self.resource_name)
+                idn = self.instrument.query('*IDN?').strip()
+                if 'FLUKE' not in idn or 'PM5139' not in idn:
+                    self.instrument.close()
+                    self.instrument = None
+                    raise SiglentConnectionError(
+                        f"Resource {self.resource_name} is not a Fluke PM5139 (got: {idn})."
+                    )
+                print(f"Connected to: {idn}")
+                print(f"Resource: {self.resource_name}")
+                return
+            except pyvisa.Error as e:
+                raise SiglentConnectionError(
+                    f"Could not connect to {self.resource_name}. Check resource name and connections.",
+                    pyvisa_error=e
+                )
+        try:
+            resources = self.rm.list_resources()
+        except pyvisa.Error as e:
+            raise SiglentConnectionError(
+                "Could not list VISA resources. Ensure NI-VISA is installed and instruments are connected.",
+                pyvisa_error=e
+            )
+        for resource in resources:
+            try:
+                test_instr = cast(MessageBasedResource, self.rm.open_resource(resource))
+                test_instr.timeout = 2000
+                self._configure_serial(resource)
+                idn = test_instr.query('*IDN?').strip()
+                if 'FLUKE' in idn and 'PM5139' in idn:
+                    self.instrument = test_instr
+                    self.instrument.timeout = self.timeout
+                    self.resource_name = resource
+                    print(f"Connected to: {idn}")
+                    print(f"Resource: {resource}")
+                    return
+                test_instr.close()
+            except pyvisa.Error:
+                continue
+        raise SiglentConnectionError(
+            "No Fluke PM5139 instrument found. Check connections and power."
+        )
+
+    def disconnect(self) -> None:
+        if self.instrument:
+            try:
+                self.instrument.close()
+            except pyvisa.Error as e:
+                raise SiglentConnectionError(
+                    "Error closing instrument connection",
+                    pyvisa_error=e
+                )
+            self.instrument = None
+
+    @property
+    def channel(self) -> int:
+        return 1
+
+    @channel.setter
+    def channel(self, value: int) -> None:
+        if value != 1:
+            raise SiglentValidationError(
+                f"PM5139 is single-channel; channel must be 1, got {value}"
+            )
+
+    @property
+    def frequency(self) -> Union[Any, Tuple[float, str]]:
+        self._ensure_connected()
+        try:
+            instrument = self._get_instrument()
+            response = instrument.query('FREQ?').strip()
+            value, unit_str = self._extract_value_and_unit(response)
+            u = unit_str.upper()
+            if 'KHZ' in u or 'KH' in u:
+                return self._format_quantity(value, unit_str, 'kilohertz')
+            if 'MHZ' in u or 'MH' in u:
+                return self._format_quantity(value, unit_str, 'megahertz')
+            return self._format_quantity(value, unit_str, 'hertz')
+        except pyvisa.Error as e:
+            raise SiglentCommandError("Failed to query frequency", pyvisa_error=e)
+        except ValueError as e:
+            raise SiglentCommandError(str(e))
+
+    @frequency.setter
+    def frequency(self, value: Union[float, int]) -> None:
+        self._ensure_connected()
+        freq_hz = float(value)
+        if not (self.limits.freq_min <= freq_hz <= self.limits.freq_max):
+            raise SiglentValidationError(
+                f"Frequency {freq_hz} Hz is outside valid range [{self.limits.freq_min}, {self.limits.freq_max}] Hz."
+            )
+        try:
+            self._get_instrument().write(f'FREQ {freq_hz}')
+        except pyvisa.Error as e:
+            raise SiglentCommandError(f"Failed to set frequency to {freq_hz} Hz", pyvisa_error=e)
+
+    def _parse_lrn(self) -> str:
+        instrument = self._get_instrument()
+        return instrument.query('*LRN?').strip()
+
+    @property
+    def amplitude(self) -> Union[Any, Tuple[float, str]]:
+        self._ensure_connected()
+        try:
+            lrn = self._parse_lrn()
+            m = re.search(r'AMPLT(?:UDE)?\s+([+-]?[\d.]+(?:[eE][+-]?\d+)?)', lrn, re.IGNORECASE)
+            if m:
+                value = float(m.group(1))
+                return self._format_quantity(value, 'V', 'volt')
+            instrument = self._get_instrument()
+            response = instrument.query('AMPLTUDE?').strip()
+            value, unit_str = self._extract_value_and_unit(response)
+            return self._format_quantity(value, unit_str or 'V', 'volt')
+        except pyvisa.Error as e:
+            raise SiglentCommandError("Failed to query amplitude", pyvisa_error=e)
+        except ValueError as e:
+            raise SiglentCommandError(str(e))
+
+    @amplitude.setter
+    def amplitude(self, value: Union[float, int]) -> None:
+        self._ensure_connected()
+        amp_v = float(value)
+        if not (self.limits.amp_min <= amp_v <= self.limits.amp_max):
+            raise SiglentValidationError(
+                f"Amplitude {amp_v} V is outside valid range [{self.limits.amp_min}, {self.limits.amp_max}] V."
+            )
+        try:
+            self._get_instrument().write(f'AMPLTUDE {amp_v}')
+        except pyvisa.Error as e:
+            raise SiglentCommandError(f"Failed to set amplitude to {amp_v} V", pyvisa_error=e)
+
+    @property
+    def offset(self) -> Union[Any, Tuple[float, str]]:
+        self._ensure_connected()
+        try:
+            lrn = self._parse_lrn()
+            pattern = re.compile(r'DCOFF(?:SET)?\s+([+-]?[\d.]+(?:[eE][+-]?\d+)?)', re.IGNORECASE)
+            for m in pattern.finditer(lrn):
+                value = float(m.group(1))
+                return self._format_quantity(value, 'V', 'volt')
+            instrument = self._get_instrument()
+            response = instrument.query('DCOFFSET?').strip()
+            value, unit_str = self._extract_value_and_unit(response)
+            return self._format_quantity(value, unit_str or 'V', 'volt')
+        except pyvisa.Error as e:
+            raise SiglentCommandError("Failed to query offset", pyvisa_error=e)
+        except ValueError as e:
+            raise SiglentCommandError(str(e))
+
+    @offset.setter
+    def offset(self, value: Union[float, int]) -> None:
+        self._ensure_connected()
+        offset_v = float(value)
+        if not (self.limits.offset_min <= offset_v <= self.limits.offset_max):
+            raise SiglentValidationError(
+                f"Offset {offset_v} V is outside valid range [{self.limits.offset_min}, {self.limits.offset_max}] V."
+            )
+        try:
+            self._get_instrument().write(f'DCOFFSET {offset_v}')
+        except pyvisa.Error as e:
+            raise SiglentCommandError(f"Failed to set offset to {offset_v} V", pyvisa_error=e)
+
+    @property
+    def phase(self) -> Union[Any, Tuple[float, str]]:
+        return self._format_quantity(0.0, 'DEG', 'degree')
+
+    @phase.setter
+    def phase(self, value: Union[float, int]) -> None:
+        pass
+
+    @property
+    def waveform_type(self) -> str:
+        self._ensure_connected()
+        try:
+            response = self._get_instrument().query('WAVEFORM?').strip().upper()
+            return self._PM5139_TO_WAVEFORM.get(response, response)
+        except pyvisa.Error as e:
+            raise SiglentCommandError("Failed to query waveform type", pyvisa_error=e)
+
+    @waveform_type.setter
+    def waveform_type(self, value: str) -> None:
+        self._ensure_connected()
+        uv = value.upper()
+        if uv not in self.VALID_WAVEFORMS:
+            raise SiglentValidationError(
+                f"Invalid waveform type '{value}'. Valid types: {', '.join(self.VALID_WAVEFORMS)}"
+            )
+        cmd = self._WAVEFORM_TO_PM5139.get(uv, uv)
+        if cmd == 'DC':
+            try:
+                self._get_instrument().write('AMPLTUDE 0')
+                self._get_instrument().write('DCON')
+            except pyvisa.Error as e:
+                raise SiglentCommandError("Failed to set DC waveform", pyvisa_error=e)
+            return
+        try:
+            self._get_instrument().write(f'WAVEFORM {cmd}')
+        except pyvisa.Error as e:
+            raise SiglentCommandError(f"Failed to set waveform type to {value}", pyvisa_error=e)
+
+    @property
+    def output_state(self) -> bool:
+        self._ensure_connected()
+        try:
+            lrn = self._parse_lrn().upper().replace(' ', '')
+            if 'ACOFF' in lrn:
+                return False
+            if 'ACON' in lrn:
+                return True
+            return False
+        except pyvisa.Error as e:
+            raise SiglentCommandError("Failed to query output state", pyvisa_error=e)
+
+    @output_state.setter
+    def output_state(self, value: bool) -> None:
+        self._ensure_connected()
+        ac = 'ACON' if value else 'ACOFF'
+        dc = 'DCON' if value else 'DCOFF'
+        try:
+            self._get_instrument().write(f'{ac}; {dc}')
+        except pyvisa.Error as e:
+            raise SiglentCommandError(f"Failed to set output state to {value}", pyvisa_error=e)
+
+    @property
+    def load_impedance(self) -> Union[Any, Tuple[float, str], str]:
+        self._ensure_connected()
+        try:
+            lrn = self._parse_lrn()
+            u = lrn.upper()
+            if 'LOWIMP' in u:
+                rest = u.split('LOWIMP', 1)[-1].strip()
+                if rest.startswith('OFF'):
+                    return self._format_quantity(50.0, 'ohm', 'ohm') if (self._unit_mode == 'pint' and ureg) else (50.0, 'ohm')
+            return 'HiZ'
+        except pyvisa.Error as e:
+            raise SiglentCommandError("Failed to query load impedance", pyvisa_error=e)
+
+    @load_impedance.setter
+    def load_impedance(self, value: Union[str, int, float]) -> None:
+        self._ensure_connected()
+        if isinstance(value, str):
+            s = value.upper()
+            if s in ('HIZ', 'HIGH', 'LOW'):
+                load_cmd = 'LOWIMP ON'
+            elif s == '50':
+                load_cmd = 'LOWIMP OFF'
+            else:
+                raise SiglentValidationError(f"Load impedance must be 'HiZ' or 50, got '{value}'")
+        else:
+            v = float(value)
+            if abs(v - 50) < 0.1:
+                load_cmd = 'LOWIMP OFF'
+            else:
+                raise SiglentValidationError(f"PM5139 supports only 50 ohm or HiZ (low Z); got {value}")
+        try:
+            self._get_instrument().write(load_cmd)
+        except pyvisa.Error as e:
+            raise SiglentCommandError(f"Failed to set load impedance to {value}", pyvisa_error=e)
+
+    def check_connection(self) -> bool:
+        self._ensure_connected()
+        try:
+            idn = self._get_instrument().query('*IDN?')
+            print(f"Instrument responding: {idn.strip()}")
+            return True
+        except pyvisa.Error as e:
+            raise SiglentCommandError("Communication error during connection check", pyvisa_error=e)
+
+    def reset(self) -> None:
+        self._ensure_connected()
+        try:
+            self._get_instrument().write('*RST')
+        except pyvisa.Error as e:
+            raise SiglentCommandError("Reset command failed", pyvisa_error=e)
+
+    def get_all_parameters(self) -> str:
+        self._ensure_connected()
+        try:
+            return self._parse_lrn()
+        except pyvisa.Error as e:
+            raise SiglentCommandError("Failed to query all parameters", pyvisa_error=e)
+
+    def list_waveforms(self) -> List[Dict[str, str]]:
+        return [{'index': str(i), 'name': f'ARB{i}'} for i in range(1, 25)]
+
+    def select_arbitrary_waveform(self, index: Optional[int] = None, name: Optional[str] = None) -> None:
+        self._ensure_connected()
+        if index is None and name is None:
+            raise SiglentValidationError(
+                "Must specify either 'index' or 'name' parameter. Use list_waveforms() to see options."
+            )
+        if index is not None and name is not None:
+            raise SiglentValidationError("Specify either 'index' or 'name', not both.")
+        if index is not None:
+            if not (1 <= index <= 24):
+                raise SiglentValidationError(f"ARB index must be 1-24, got {index}")
+            try:
+                self._get_instrument().write(f'ARBITRARY {index}')
+            except pyvisa.Error as e:
+                raise SiglentCommandError("Failed to select arbitrary waveform", pyvisa_error=e)
+            return
+        if name is not None:
+            match = re.match(r'ARB(\d+)', name.upper())
+            if match:
+                idx = int(match.group(1))
+                if 1 <= idx <= 24:
+                    self._get_instrument().write(f'ARBITRARY {idx}')
+                    return
+            raise SiglentValidationError(
+                "PM5139 supports selection by index (1-24) only; name must match ARB<n>."
+            )
+
+    def get_duty_cycle(self) -> Union[Any, Tuple[float, str]]:
+        self._ensure_connected()
+        try:
+            response = self._get_instrument().query('DUTYCYCLE?').strip()
+            value, unit_str = self._extract_value_and_unit(response)
+            return self._format_quantity(value, unit_str or '%', 'percent')
+        except pyvisa.Error:
+            try:
+                lrn = self._parse_lrn()
+                for part in lrn.split(';'):
+                    if 'DUTYCYCLE' in part.upper() or 'DUTY' in part.upper():
+                        m = re.search(r'([+-]?[\d.]+)', part)
+                        if m:
+                            v = float(m.group(1))
+                            return self._format_quantity(v, '%', 'percent')
+            except (pyvisa.Error, ValueError):
+                pass
+            return self._format_quantity(50.0, '%', 'percent')
+
+    def set_duty_cycle(self, duty: Union[float, int]) -> None:
+        self._ensure_connected()
+        duty_percent = float(duty)
+        if not (0 <= duty_percent <= 100):
+            raise SiglentValidationError(f"Duty cycle must be between 0 and 100%, got {duty_percent}%")
+        try:
+            self._get_instrument().write(f'DUTYCYCLE {duty_percent}')
+        except pyvisa.Error as e:
+            raise SiglentCommandError(f"Failed to set duty cycle to {duty_percent}%", pyvisa_error=e)
+
+    def get_symmetry(self) -> Union[Any, Tuple[float, str]]:
+        self._ensure_connected()
+        try:
+            lrn = self._parse_lrn()
+            if 'SYMMETRY ON' in lrn.upper():
+                return self._format_quantity(50.0, '%', 'percent')
+            return self.get_duty_cycle()
+        except pyvisa.Error as e:
+            raise SiglentCommandError("Failed to query symmetry", pyvisa_error=e)
+
+    def set_symmetry(self, symmetry: Union[float, int]) -> None:
+        self._ensure_connected()
+        sym_percent = float(symmetry)
+        if not (0 <= sym_percent <= 100):
+            raise SiglentValidationError(f"Symmetry must be between 0 and 100%, got {sym_percent}%")
+        try:
+            if abs(sym_percent - 50.0) < 0.01:
+                self._get_instrument().write('SYMMETRY ON')
+            else:
+                self._get_instrument().write('SYMMETRY OFF')
+                self._get_instrument().write(f'DUTYCYCLE {sym_percent}')
+        except pyvisa.Error as e:
+            raise SiglentCommandError(f"Failed to set symmetry to {sym_percent}%", pyvisa_error=e)
+
+    def get_pulse_width(self) -> Union[Any, Tuple[float, str]]:
+        raise SiglentValidationError("PM5139 does not support pulse width parameter.")
+
+    def set_pulse_width(self, width: Union[float, int]) -> None:
+        raise SiglentValidationError("PM5139 does not support pulse width parameter.")
+
+    def get_rise_time(self) -> Union[Any, Tuple[float, str]]:
+        raise SiglentValidationError("PM5139 does not support rise time parameter.")
+
+    def set_rise_time(self, rise_time: Union[float, int]) -> None:
+        raise SiglentValidationError("PM5139 does not support rise time parameter.")
+
+    def get_fall_time(self) -> Union[Any, Tuple[float, str]]:
+        raise SiglentValidationError("PM5139 does not support fall time parameter.")
+
+    def set_fall_time(self, fall_time: Union[float, int]) -> None:
+        raise SiglentValidationError("PM5139 does not support fall time parameter.")
+
+    def configure_waveform(
+        self,
+        waveform_type: str,
+        frequency: Union[float, int],
+        amplitude: Union[float, int],
+        offset: Union[float, int] = 0,
+        phase: Union[float, int] = 0
+    ) -> None:
+        self._ensure_connected()
+        uv = waveform_type.upper()
+        if uv not in self.VALID_WAVEFORMS:
+            raise SiglentValidationError(
+                f"Invalid waveform type '{waveform_type}'. Valid types: {', '.join(self.VALID_WAVEFORMS)}"
+            )
+        freq_hz = float(frequency)
+        amp_v = float(amplitude)
+        offset_v = float(offset)
+        if not (self.limits.freq_min <= freq_hz <= self.limits.freq_max):
+            raise SiglentValidationError(
+                f"Frequency {freq_hz} Hz is outside valid range [{self.limits.freq_min}, {self.limits.freq_max}] Hz."
+            )
+        if not (self.limits.amp_min <= amp_v <= self.limits.amp_max):
+            raise SiglentValidationError(
+                f"Amplitude {amp_v} V is outside valid range [{self.limits.amp_min}, {self.limits.amp_max}] V."
+            )
+        if not (self.limits.offset_min <= offset_v <= self.limits.offset_max):
+            raise SiglentValidationError(
+                f"Offset {offset_v} V is outside valid range [{self.limits.offset_min}, {self.limits.offset_max}] V."
+            )
+        if abs(offset_v) + amp_v / 2 > 10:
+            raise SiglentValidationError(
+                "AC peak + DC offset must not exceed +/-10 V."
+            )
+        cmd = self._WAVEFORM_TO_PM5139.get(uv, uv)
+        try:
+            instr = self._get_instrument()
+            if cmd == 'DC':
+                instr.write('AMPLTUDE 0')
+                instr.write('DCOFFSET 0')
+                instr.write('DCON')
+            else:
+                instr.write(f'WAVEFORM {cmd}; FREQ {freq_hz}; AMPLTUDE {amp_v}; DCOFFSET {offset_v}')
+        except pyvisa.Error as e:
+            raise SiglentCommandError(
+                f"Failed to configure waveform: type={waveform_type}, freq={freq_hz}, amp={amp_v}, offset={offset_v}",
                 pyvisa_error=e
             )
