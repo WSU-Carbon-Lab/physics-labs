@@ -2061,12 +2061,12 @@ class PhilipsPM5139:
         self.resource_name = resource_name
         self.timeout = timeout
         self.limits = ParameterLimits()
-        self.limits.freq_min = 1e-4
-        self.limits.freq_max = 20e6
-        self.limits.amp_min = 0.0
-        self.limits.amp_max = 20.0
-        self.limits.offset_min = -10.0
-        self.limits.offset_max = 10.0
+        self.limits._freq_min = 1e-4
+        self.limits._freq_max = 20e6
+        self.limits._amp_min = 0.0
+        self.limits._amp_max = 20.0
+        self.limits._offset_min = -10.0
+        self.limits._offset_max = 10.0
         self._unit_mode: Optional[str] = None
         self.unit_mode = unit_mode
 
@@ -2101,10 +2101,16 @@ class PhilipsPM5139:
         return cast(MessageBasedResource, self.instrument)
 
     def _extract_value_and_unit(self, value_string: str) -> Tuple[float, str]:
-        match = re.match(r'([+-]?[\d.]+(?:[eE][+-]?\d+)?)(.+)?', value_string.strip())
+        s = value_string.strip()
+        match = re.match(r'([+-]?[\d.]+(?:[eE][+-]?\d+)?)(.+)?', s)
         if match:
             value = float(match.group(1))
             unit = match.group(2).strip() if match.group(2) else ''
+            return value, unit
+        search = re.search(r'([+-]?[\d.]+(?:[eE][+-]?\d+)?)\s*(.*)', s)
+        if search:
+            value = float(search.group(1))
+            unit = search.group(2).strip() if search.group(2) else ''
             return value, unit
         raise ValueError(f"Could not extract value and unit from: {value_string}")
 
