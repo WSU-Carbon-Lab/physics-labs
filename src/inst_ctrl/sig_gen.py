@@ -2142,11 +2142,11 @@ class PhilipsPM5139:
                 self.instrument.timeout = self.timeout
                 self._configure_serial(self.resource_name)
                 idn = self.instrument.query('*IDN?').strip()
-                if 'FLUKE' not in idn or 'PM5139' not in idn:
+                if 'PM5139' not in idn or 'PHILIPS' not in idn or 'PM5138A' not in idn:
                     self.instrument.close()
                     self.instrument = None
                     raise SiglentConnectionError(
-                        f"Resource {self.resource_name} is not a Fluke PM5139 (got: {idn})."
+                        f"Resource {self.resource_name} is not a Philips PM5139 (got: {idn})."
                     )
                 print(f"Connected to: {idn}")
                 print(f"Resource: {self.resource_name}")
