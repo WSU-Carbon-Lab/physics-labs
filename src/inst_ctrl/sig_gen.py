@@ -2226,10 +2226,10 @@ class PhilipsPM5139:
             value, unit_str = self._extract_value_and_unit(response)
             u = unit_str.upper()
             if 'KHZ' in u or 'KH' in u:
-                return self._format_quantity(value, unit_str, 'kilohertz')
+                return self._format_quantity(value, unit_str or 'Hz', 'kilohertz')
             if 'MHZ' in u or 'MH' in u:
-                return self._format_quantity(value, unit_str, 'megahertz')
-            return self._format_quantity(value, unit_str, 'hertz')
+                return self._format_quantity(value, unit_str or 'Hz', 'megahertz')
+            return self._format_quantity(value, unit_str or 'Hz', 'hertz')
         except pyvisa.Error as e:
             raise SiglentCommandError("Failed to query frequency", pyvisa_error=e)
         except ValueError as e:
@@ -2295,7 +2295,7 @@ class PhilipsPM5139:
             instrument = self._get_instrument()
             response = instrument.query('DCOFFSET?').strip()
             value, unit_str = self._extract_value_and_unit(response)
-            return self._format_quantity(value, unit_str or 'V', 'volt')
+            return self._format_quantity(value, 'V', 'volt')
         except pyvisa.Error as e:
             raise SiglentCommandError("Failed to query offset", pyvisa_error=e)
         except ValueError as e:
