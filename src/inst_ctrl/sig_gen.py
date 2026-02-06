@@ -2135,6 +2135,12 @@ class PhilipsPM5139:
         except (pyvisa.Error, AttributeError):
             pass
 
+    def _is_pm513x_idn(self, idn: str) -> bool:
+        idn_upper = idn.upper()
+        manufacturer_ok = 'PHILIPS' in idn_upper or 'FLUKE' in idn_upper
+        model_ok = 'PM5139' in idn_upper or 'PM5138' in idn_upper
+        return bool(manufacturer_ok and model_ok)
+
     def connect(self) -> None:
         if self.resource_name:
             try:
@@ -2142,11 +2148,11 @@ class PhilipsPM5139:
                 self.instrument.timeout = self.timeout
                 self._configure_serial(self.resource_name)
                 idn = self.instrument.query('*IDN?').strip()
-                if 'PM5139' not in idn or 'PHILIPS' not in idn or 'PM5138A' not in idn:
+                if not self._is_pm513x_idn(idn):
                     self.instrument.close()
                     self.instrument = None
                     raise SiglentConnectionError(
-                        f"Resource {self.resource_name} is not a Philips PM5139 (got: {idn})."
+                        f"Resource {self.resource_name} is not a Philips/Fluke PM5138A/PM5139 (got: {idn})."
                     )
                 print(f"Connected to: {idn}")
                 print(f"Resource: {self.resource_name}")
@@ -2169,7 +2175,7 @@ class PhilipsPM5139:
                 test_instr.timeout = 2000
                 self._configure_serial(resource)
                 idn = test_instr.query('*IDN?').strip()
-                if 'FLUKE' in idn and 'PM5139' in idn:
+                if self._is_pm513x_idn(idn):
                     self.instrument = test_instr
                     self.instrument.timeout = self.timeout
                     self.resource_name = resource
@@ -2180,7 +2186,7 @@ class PhilipsPM5139:
             except pyvisa.Error:
                 continue
         raise SiglentConnectionError(
-            "No Fluke PM5139 instrument found. Check connections and power."
+            "No Philips/Fluke PM5138A/PM5139 instrument found. Check connections and power."
         )
 
     def disconnect(self) -> None:
